@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "none",                       // No modules
+    "outDir": "./dist",                    // Not used for build, but required
+    "rootDir": ".",                        // Allow lib and src in root scope
+    "strict": true,
+    "esModuleInterop": false,
+    "skipLibCheck": true,
+    "noEmit": true,                         // We build manually
+    "types": [],
+    "paths": {
+      "modlib": ["./.lib"],
+    }
+  },
+  "include": ["src", ".lib/**/*.d.ts"]
+}
