@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const SRC_DIR = path.join(__dirname, '..', 'src');
+const CLASSES_DIR = path.join(SRC_DIR, 'classes'); // <== NEW
 const DIST_DIR = path.join(__dirname, "..", 'dist');
 const OUTPUT_FILE = path.join(DIST_DIR, 'mod.ts');
 
@@ -24,25 +25,33 @@ function getAllTSFiles(dir, fileList = []) {
 function concatenateTSFiles() {
   const tsFiles = getAllTSFiles(SRC_DIR);
 
-  // Find and isolate variables.ts
+  // Isolate variables.ts and types.ts
   const variablesFile = tsFiles.find(filePath =>
     path.basename(filePath) === 'variables.ts'
   );
 
-  // Find and isolate types.ts
   const typesFile = tsFiles.find(filePath =>
     path.basename(filePath) === 'types.ts'
   );
 
-  // Remove it from the original list if found
+  // Get all class files (explicitly from src/classes/)
+  const classFiles = fs.existsSync(CLASSES_DIR)
+    ? getAllTSFiles(CLASSES_DIR)
+    : [];
+
+  // Filter out variables.ts, types.ts, and class files from the rest
   const otherFiles = tsFiles.filter(filePath =>
-    filePath !== variablesFile && filePath !== typesFile
+    filePath !== variablesFile &&
+    filePath !== typesFile &&
+    !classFiles.includes(filePath)
   );
 
-  // Final file order: variables.ts (if found) + everything else
+  // Final file order:
+  // variables.ts (if any) -> types.ts (if any) -> class files -> rest
   const finalFileOrder = [
     ...(variablesFile ? [variablesFile] : []),
     ...(typesFile ? [typesFile] : []),
+    ...classFiles,
     ...otherFiles
   ];
 
@@ -69,3 +78,4 @@ function concatenateTSFiles() {
 
 // Run it
 concatenateTSFiles();
+
