@@ -1,0 +1,147 @@
+name: Release on tag
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.deleted != true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout full history (with tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run build
+        run: |
+          npm run build
+          echo "Waiting a few seconds to ensure dist/mod.ts is ready..."
+          sleep 4
+
+      - name: Verify build output
+        run: |
+          if [ ! -f dist/mod.ts ]; then
+            echo "❌ dist/mod.ts not found! Make sure your build outputs it."
+            exit 1
+          fi
+          echo "✅ Found dist/mod.ts"
+
+      - name: Determine current and previous tag
+        id: tags
+        shell: bash
+        run: |
+          current="${{ github.ref_name }}"
+          prev="$(git describe --tags --abbrev=0 "${current}^" 2>/dev/null || echo "")"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "previous=$prev"   >> "$GITHUB_OUTPUT"
+
+      - name: Build grouped changelog -> file
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="${{ steps.tags.outputs.current }}"
+          previous="${{ steps.tags.outputs.previous }}"
+          if [ -n "$previous" ]; then
+            range="$previous..$current"
+          else
+            root="$(git rev-list --max-parents=0 "$current")"
+            range="${root}..${current}"
+          fi
+
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          changed=(); added=(); deleted=(); other=()
+
+          while IFS=$'\x1f' read -r h s || [ -n "${h:-}" ]; do
+            [ -z "${h:-}" ] && continue
+            short="${h:0:7}"
+            line="- [${short}](${repo_url}/commit/${h}) ${s}"
+            slc="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+            if [[ "$slc" == *changed* || "$slc" == *update* || "$slc" == *updated* ]]; then
+              changed+=("$line")
+            elif [[ "$slc" == add* || "$slc" == *added* ]]; then
+              added+=("$line")
+            elif [[ "$slc" == delet* || "$slc" == *deleted* || "$slc" == *remove* || "$slc" == *removed* ]]; then
+              deleted+=("$line")
+            else
+              other+=("$line")
+            fi
+          done < <(git log "$range" --pretty=format:'%H%x1f%s')
+
+          outfile="CHANGELOG_RELEASE.md"
+          {
+            echo "Changelog:"; echo
+            [ ${#changed[@]} -gt 0 ] && { echo "**CHANGED**"; printf '%s\n' "${changed[@]}"; echo; }
+            [ ${#added[@]}   -gt 0 ] && { echo "**ADDED**";   printf '%s\n' "${added[@]}";   echo; }
+            [ ${#deleted[@]} -gt 0 ] && { echo "**DELETED**"; printf '%s\n' "${deleted[@]}"; echo; }
+            if [ $(( ${#changed[@]} + ${#added[@]} + ${#deleted[@]} )) -eq 0 ]; then
+              [ ${#other[@]} -gt 0 ] && { printf '%s\n' "${other[@]}"; echo; } || echo "(No changes found)"
+            fi
+          } > "$outfile"
+          echo "body_path=$outfile" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare renamed release asset
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_name="$(basename "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          tag="${{ steps.tags.outputs.current }}"
+
+          mkdir -p release
+          new_name="${repo_name}-v${tag}.ts"
+          cp dist/mod.ts "release/${new_name}"
+
+          echo "asset_path=release/${new_name}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${new_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Package maps and scenes (if present)
+        id: extras
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tags.outputs.current }}"
+          mkdir -p release
+
+          if [ -d maps ]; then
+            echo "📦 Packaging maps/ -> release/maps-v${tag}.zip"
+            zip -r "release/maps-v${tag}.zip" maps > /dev/null
+          else
+            echo "ℹ️ maps/ not found; skipping."
+          fi
+
+          if [ -d scenes ]; then
+            echo "📦 Packaging scenes/ -> release/scenes-v${tag}.zip"
+            zip -r "release/scenes-v${tag}.zip" scenes > /dev/null
+          else
+            echo "ℹ️ scenes/ not found; skipping."
+          fi
+
+      - name: Create GitHub Release (published with assets)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tags.outputs.current }}
+          name: ${{ github.event.repository.name }} v${{ steps.tags.outputs.current }}
+          body_path: ${{ steps.changelog.outputs.body_path }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          files: |
+            release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

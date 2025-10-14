@@ -1,0 +1,219 @@
+name: Wiki changelog on tag
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to document (e.g., 0.0.3). If omitted, uses the pushed tag."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  wiki:
+    if: github.event.deleted != true
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout full history (with tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag (push vs manual)
+        id: res
+        shell: bash
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then tag="${{ github.ref_name }}"; fi
+          git fetch --tags --force
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag '${tag}' not found." >&2; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Determine previous tag and human-friendly timestamp
+        id: tags
+        shell: bash
+        run: |
+          current="${{ steps.res.outputs.tag }}"
+          prev="$(git describe --tags --abbrev=0 "${current}^" 2>/dev/null || echo "")"
+
+          # Prefer annotated tag date; fallback to commit date
+          tag_date_iso="$(git for-each-ref --format='%(taggerdate:iso8601)' "refs/tags/${current}")"
+          if [ -z "$tag_date_iso" ]; then
+            tag_date_iso="$(git log -1 --format=%cI "${current}")"
+          fi
+
+          # Human-friendly UTC (switch to Europe/Berlin if you prefer)
+          tag_date_human="$(date -u -d "$tag_date_iso" '+%A, %d %B %Y at %H:%M UTC')"
+
+          echo "current=$current"               >> "$GITHUB_OUTPUT"
+          echo "previous=$prev"                 >> "$GITHUB_OUTPUT"
+          echo "tag_date_iso=$tag_date_iso"     >> "$GITHUB_OUTPUT"
+          echo "tag_date_human=$tag_date_human" >> "$GITHUB_OUTPUT"
+
+      - name: Build grouped changelog (author + commit date) -> section file
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="${{ steps.tags.outputs.current }}"
+          previous="${{ steps.tags.outputs.previous }}"
+
+          if [ -n "$previous" ]; then
+            range="$previous..$current"
+          else
+            root="$(git rev-list --max-parents=0 "$current")"
+            range="${root}..${current}"
+          fi
+
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+          changed=(); added=(); deleted=(); other=()
+
+          # %H hash, %s subject, %an author, %aI author date (ISO)
+          while IFS=$'\x1f' read -r h s an ad || [ -n "${h:-}" ]; do
+            [ -z "${h:-}" ] && continue
+            short="${h:0:7}"
+            line="- [${short}](${repo_url}/commit/${h}) ${s} — _by ${an} on ${ad}_"
+            slc="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+            if   [[ "$slc" == *changed* || "$slc" == *update* || "$slc" == *updated* ]]; then changed+=("$line")
+            elif [[ "$slc" == add*     || "$slc" == *added* ]]; then added+=("$line")
+            elif [[ "$slc" == delet*   || "$slc" == *deleted* || "$slc" == *remove* || "$slc" == *removed* ]]; then deleted+=("$line")
+            else other+=("$line"); fi
+          done < <(git log "$range" --pretty=format:'%H%x1f%s%x1f%an%x1f%aI')
+
+          out="SECTION_${current}.md"
+          {
+            echo "<a id=\"v${current}\"></a>"
+            echo "## v${current}"
+            echo
+            echo "_Tag created: **${{ steps.tags.outputs.tag_date_human }}**  (ISO: \`${{ steps.tags.outputs.tag_date_iso }}\`)_"
+            echo
+            [ ${#changed[@]} -gt 0 ] && { echo "**CHANGED**"; printf '%s\n' "${changed[@]}"; echo; }
+            [ ${#added[@]}   -gt 0 ] && { echo "**ADDED**";   printf '%s\n' "${added[@]}";   echo; }
+            [ ${#deleted[@]} -gt 0 ] && { echo "**DELETED**"; printf '%s\n' "${deleted[@]}"; echo; }
+            if [ $(( ${#changed[@]} + ${#added[@]} + ${#deleted[@]} )) -eq 0 ]; then
+              [ ${#other[@]} -gt 0 ] && { printf '%s\n' "${other[@]}"; echo; } || echo "(No changes found)"
+            fi
+          } > "$out"
+
+          echo "section_path=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Update GitHub Wiki (single Changelog.md with anchors + index)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          current="${{ steps.tags.outputs.current }}"
+          section_file="${{ steps.changelog.outputs.section_path }}"
+          idx_date="${{ steps.tags.outputs.tag_date_human }}"
+
+          WIKI_URL="https://${GITHUB_ACTOR}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          git clone --depth 1 "$WIKI_URL" wiki
+
+          changelog="wiki/Changelog.md"
+          tmp="wiki/_Changelog.new.md"
+
+          # Read old content if exists
+          old=""
+          if [ -f "$changelog" ]; then
+            old="$(cat "$changelog")"
+          fi
+
+          # Strip any existing section for this version (from <a id="vX"> up to next <a id="v..."> or EOF)
+          if [ -n "$old" ]; then
+            old="$(awk -v id="v${current}" '
+              BEGIN{drop=0}
+              /^<a id="v[^"]+">/ {
+                if ($0 ~ "<a id=\"" id "\">"){ drop=1; next }
+                if (drop==1){ drop=0 } # first new section starts; fallthrough prints this line
+              }
+              { if (drop==0) print }
+            ' <(printf "%s" "$old"))"
+          fi
+
+          # Collect existing version ids from remaining content
+          mapfile -t ids < <(printf "%s" "${old}" | grep -oE '<a id="v[^"]+">' | sed -E 's/^<a id="(v[^"]+)">$/\1/' || true)
+
+          # Rebuild index (current first, then the rest unique in original order)
+          {
+            echo "# Changelog"
+            echo
+            echo "<!--INDEX-START-->"
+            echo "- [[#v${current}|v${current}]] — ${idx_date}"
+            if [ ${#ids[@]} -gt 0 ]; then
+              for id in "${ids[@]}"; do
+                [ "$id" = "v${current}" ] && continue
+                echo "- [[#${id}|${id}]]"
+              done
+            fi
+            echo "<!--INDEX-END-->"
+            echo
+            # Insert the new section first
+            cat "$section_file"
+            echo
+            # Then the rest of the old content, minus any prior header & old index block if present
+            if [ -n "$old" ]; then
+              printf "%s" "$old" | awk '
+                BEGIN{skip=0}
+                /^# Changelog$/ {next}
+                /^<!--INDEX-START-->/ {skip=1; next}
+                /^<!--INDEX-END-->/ {skip=0; next}
+                { if (!skip) print }
+              '
+            fi
+          } > "$tmp"
+
+          mv "$tmp" "$changelog"
+
+          # Keep a helpful Sidebar pointing to the single page + latest anchor
+          sidebar="wiki/_Sidebar.md"
+          link_latest="* [[Changelog#v${current}|v${current}]] — ${idx_date}"
+          if [ -f "$sidebar" ]; then
+            awk -v latest="$link_latest" '
+              BEGIN{printed=0; have_chapter=0; added_latest=0}
+              tolower($0) ~ /^## changelog/ { have_chapter=1 }
+              { lines[NR]=$0 }
+              END{
+                if (!have_chapter){
+                  print "## Changelog\n"
+                  print "* [[Changelog|Changelog (all versions)]]"
+                  print latest "\n"
+                }
+                for(i=1;i<=NR;i++){
+                  print lines[i]
+                  if (tolower(lines[i]) ~ /^## changelog/){
+                    print ""
+                    print "* [[Changelog|Changelog (all versions)]]"
+                    print latest
+                  }
+                }
+              }
+            ' "$sidebar" > "wiki/_Sidebar.new.md"
+            mv "wiki/_Sidebar.new.md" "$sidebar"
+          else
+            {
+              echo "## Changelog"
+              echo
+              echo "* [[Changelog|Changelog (all versions)]]"
+              echo "$link_latest"
+              echo
+            } > "$sidebar"
+          fi
+
+          pushd wiki >/dev/null
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "Changelog.md" "_Sidebar.md" || true
+          git commit -m "Wiki: update single-page Changelog with v${current}" || echo "No wiki changes to commit."
+          git push
+          popd >/dev/null
