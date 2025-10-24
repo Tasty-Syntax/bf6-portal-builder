@@ -5,7 +5,7 @@ const http = require('http');
 const path = require('path');
 const urlModule = require('url');
 
-const repo = 'Tasty-Syntax/bf6-portal-builder';
+const repo = 'Tasty-Syntax/TastyLib';
 const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
 
 function fetchJson(url) {
@@ -74,6 +74,29 @@ function downloadFile(url, dest) {
   });
 }
 
+async function download(downloadUrl: string) {
+  const fileName = path.basename(downloadUrl);
+  const tmpPath = path.join(__dirname, 'temp_' + fileName);
+  const outputDir = path.join(__dirname, '..', 'libs');
+  const outputPath = path.join(outputDir, fileName);
+
+  console.log(`Downloading from: ${downloadUrl}`);
+  await downloadFile(downloadUrl, tmpPath);
+
+  const content = fs.readFileSync(tmpPath, 'utf-8');
+
+  const lines = content.split(/\r?\n/);
+  if (lines.length === 0) {
+    console.warn(`Downloaded file is empty`);
+  }
+
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputPath, content, 'utf-8');
+  console.log(`Wrote processed file to: ${outputPath}`);
+
+  fs.unlinkSync(tmpPath);
+}
+
 (async () => {
   try {
     console.log(`Fetching latest release info from ${apiUrl}`);
@@ -92,29 +115,9 @@ function downloadFile(url, dest) {
       throw new Error('Asset has no browser_download_url');
     }
 
-    const fileName = path.basename(downloadUrl);
-    const tmpPath = path.join(__dirname, 'temp_' + fileName);
-    const outputDir = path.join(__dirname, '..', 'src', 'lib');
-    const outputPath = path.join(outputDir, 'tasty_lib.ts');
+    await download(assets[1].browser_download_url);
+    await download(assets[0].browser_download_url);
 
-    console.log(`Downloading from: ${downloadUrl}`);
-    await downloadFile(downloadUrl, tmpPath);
-
-    const content = fs.readFileSync(tmpPath, 'utf-8');
-
-    const lines = content.split(/\r?\n/);
-    if (lines.length === 0) {
-      console.warn(`Downloaded file is empty`);
-    }
-
-    const fileBody = lines.slice(8).join('\n');
-    const finalContent = `namespace tasty {\n${fileBody}\n}`;
-
-    fs.mkdirSync(outputDir, { recursive: true });
-    fs.writeFileSync(outputPath, finalContent, 'utf-8');
-    console.log(`Wrote processed file to: ${outputPath}`);
-
-    fs.unlinkSync(tmpPath);
 
     console.log('Done.');
     process.exit(0);
