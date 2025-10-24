@@ -10,8 +10,8 @@
     "noEmit": true,                         // We build manually
     "types": [],
     "paths": {
-      "modlib": ["./.lib"],
+      "modlib": ["./.portal"]
     }
   },
-  "include": ["src", ".lib/**/*.d.ts"]
+  "include": ["src", ".portal/**/*.d.ts", "libs/**.d.ts"]
 }

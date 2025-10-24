@@ -1,1 +1,3 @@
 dist
+libs/*.ts
+libs/*.d.ts

@@ -3,6 +3,7 @@ const path = require('path');
 
 const SRC_DIR = path.join(__dirname, '..', 'src');
 const CLASSES_DIR = path.join(SRC_DIR, 'classes'); // <== NEW
+const LIBS_DIR = path.join("libs"); // <== NEW
 const DIST_DIR = path.join(__dirname, "..", 'dist');
 const OUTPUT_FILE = path.join(DIST_DIR, 'mod.ts');
 
@@ -35,6 +36,11 @@ function concatenateTSFiles() {
   );
 
   // Get all class files (explicitly from src/classes/)
+  const libFiles = fs.existsSync(LIBS_DIR)
+    ? getAllTSFiles(LIBS_DIR)
+    : [];
+
+  // Get all class files (explicitly from src/classes/)
   const classFiles = fs.existsSync(CLASSES_DIR)
     ? getAllTSFiles(CLASSES_DIR)
     : [];
@@ -43,7 +49,8 @@ function concatenateTSFiles() {
   const otherFiles = tsFiles.filter(filePath =>
     filePath !== variablesFile &&
     filePath !== typesFile &&
-    !classFiles.includes(filePath)
+    !classFiles.includes(filePath) &&
+    !libFiles.includes(filePath)
   );
 
   // Final file order:
@@ -51,6 +58,7 @@ function concatenateTSFiles() {
   const finalFileOrder = [
     ...(variablesFile ? [variablesFile] : []),
     ...(typesFile ? [typesFile] : []),
+    ...libFiles,
     ...classFiles,
     ...otherFiles
   ];
